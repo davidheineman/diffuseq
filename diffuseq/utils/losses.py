@@ -5,9 +5,7 @@ https://github.com/hojonathanho/diffusion/blob/1e0dceb3b3495bbe19116a5e1b3596cd0
 """
 
 import numpy as np
-
 import torch as th
-
 
 def normal_kl(mean1, logvar1, mean2, logvar2):
     """

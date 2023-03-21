@@ -21,8 +21,11 @@ from transformers import set_seed
 import wandb
 
 ### custom your wandb setting here ###
-# os.environ["WANDB_API_KEY"] = ""
-os.environ["WANDB_MODE"] = "offline"
+with open('readme.txt', 'r') as f:
+    os.environ["WANDB_API_KEY"] = f.read()
+
+# print("Using CUDA launch blocking... get ready for some beautiful stack traces!")
+# os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 def create_argparser():
     defaults = dict()
@@ -63,11 +66,14 @@ def main():
     print('#'*30, 'size of vocab', args.vocab_size)
 
     logger.log("### Creating model and diffusion...")
-    # print('#'*30, 'CUDA_VISIBLE_DEVICES', os.environ['CUDA_VISIBLE_DEVICES'])
+    print('#'*30, 'CUDA_VISIBLE_DEVICES', os.environ['CUDA_VISIBLE_DEVICES'])
     model, diffusion = create_model_and_diffusion(
         **args_to_dict(args, load_defaults_config().keys())
     )
+
+    # There's some required CUDA setup, but dist_util.dev() isn't working properly
     # print('#'*30, 'cuda', dist_util.dev())
+    print(f"Local rank: {os.environ['LOCAL_RANK']}")
     model.to(dist_util.dev()) #  DEBUG **
     # model.cuda() #  DEBUG **
 

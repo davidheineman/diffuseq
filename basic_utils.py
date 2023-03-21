@@ -86,6 +86,7 @@ def load_model_emb(args, tokenizer):
                 pass
     else:
         while not os.path.exists(path_save_ind):
+            print(f"Waiting for {path_save_ind} to be created...")
             time.sleep(1)
         print('reload the random embeddings', model)
         model.load_state_dict(torch.load(path_save))
@@ -124,6 +125,7 @@ def create_model_and_diffusion(
     notes,
     **kwargs,
 ):
+    # Out-of-the-box Transformer Model
     model = TransformerNetModel(
         input_dims=hidden_dim,
         output_dims=(hidden_dim if not learn_sigma else hidden_dim*2),
@@ -134,11 +136,13 @@ def create_model_and_diffusion(
         init_pretrained=use_plm_init
     )
 
+    # Determines noise scheduling. Diffusion-LM uses sqrt
     betas = gd.get_named_beta_schedule(noise_schedule, diffusion_steps)
 
     if not timestep_respacing:
         timestep_respacing = [diffusion_steps]
 
+    # Initialize diffusion model (based on vision diffusion model)
     diffusion = SpacedDiffusion(
         use_timesteps=space_timesteps(diffusion_steps, timestep_respacing),
         betas=betas,
