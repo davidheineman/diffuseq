@@ -114,6 +114,17 @@ def betas_for_alpha_bar(num_diffusion_timesteps, alpha_bar, max_beta=0.999):
         betas.append(min(1 - alpha_bar(t2) / alpha_bar(t1), max_beta))
     return np.array(betas)
 
+def reverse_cumprod(cp):
+    """
+    Rewrite in numpy. Will perform the reverse of cumprod.
+    """
+    new_arr = [cp[0]]
+    last = cp[0]
+    for x in cp[1:]:
+        new_arr += [(x / last)]
+        last = x
+    return np.array(new_arr)
+
 class GaussianDiffusion:
     """
     Utilities for training and sampling diffusion models.
@@ -158,7 +169,33 @@ class GaussianDiffusion:
         self.num_timesteps = int(betas.shape[0])
 
         alphas = 1.0 - betas
-        self.alphas_cumprod = np.cumprod(alphas, axis=0)
+
+        clip_grad = True
+        clip_ratio = 0.69
+        # Gradient clipping: arxiv.org/pdf/2302.10025.pdf
+        if clip_grad:
+            print("WARNING: USING GRADIENT CLIPPING, COULD BREAK EVERYTHING")
+            self.alphas_cumprod = np.cumprod(alphas, axis=0)
+            stddev = np.sqrt(1-self.alphas_cumprod)
+            cutoff = int(stddev.shape[0] * clip_ratio)
+            stddev = np.append(stddev[:cutoff], np.linspace(0, 0.99, stddev.shape[0])[cutoff:])
+            self.alphas_cumprod = 1-np.power(stddev, 2, out=stddev)
+            alphas = reverse_cumprod(self.alphas_cumprod)
+            betas = 1 - alphas
+            self.betas = betas            
+        else:
+            self.alphas_cumprod = np.cumprod(alphas, axis=0)
+
+        # Regularizes betas B_t = (1-a_{t-1})/(1-a_t)*B_t.
+        # This is a bit akward to implement though
+        # last_alpha_cumprod = 1.0
+        # new_betas = []
+        # for i, alpha_cumprod in enumerate(base_diffusion.alphas_cumprod):
+        #     if i in self.use_timesteps:
+        #         new_betas.append(1 - alpha_cumprod / last_alpha_cumprod)
+        #         last_alpha_cumprod = alpha_cumprod
+        #         self.timestep_map.append(i)
+        
         self.alphas_cumprod_prev = np.append(1.0, self.alphas_cumprod[:-1])
         self.alphas_cumprod_next = np.append(self.alphas_cumprod[1:], 0.0)
         assert self.alphas_cumprod_prev.shape == (self.num_timesteps,)
@@ -496,9 +533,11 @@ class GaussianDiffusion:
             sample_x = th.randn(*shape, device=device)
         indices = list(range(self.num_timesteps))[::-1]
 
+        print("Performing p sampling")
+        progress = True # Forcing progress bar because I won't bother with arguments
+
         if progress:
-            # Lazy import so that we don't depend on tqdm.
-            from tqdm.auto import tqdm
+            from tqdm.auto import tqdm # Lazy import so that we don't depend on tqdm.
             indices = tqdm(indices)
 
         for i in indices: # from T to 0
@@ -550,14 +589,12 @@ class GaussianDiffusion:
         '''
         reshaped_x_t = x_t
         logits = get_logits(reshaped_x_t)  # bsz, seqlen, vocab
-        # print(logits.shape)
+        
         loss_fct = th.nn.CrossEntropyLoss(reduction='none')
         decoder_nll = loss_fct(logits.view(-1, logits.size(-1)), input_ids.view(-1)).view(input_ids.shape)
-        if mask != None:
+        if mask is not None:
             decoder_nll *= mask
-        # print(decoder_nll.shape)
-        if mask != None:
-            decoder_nll = decoder_nll.sum(dim=-1)/mask.sum(dim=-1)
+            decoder_nll = decoder_nll.sum(dim=-1) / mask.sum(dim=-1)
         else:
             decoder_nll = decoder_nll.mean(dim=-1)
 
@@ -602,37 +639,44 @@ class GaussianDiffusion:
         std = _extract_into_tensor(self.sqrt_one_minus_alphas_cumprod,
                                    th.tensor([0]).to(x_start_mean.device),
                                    x_start_mean.shape)
-        # print(std.shape, )
-        # x_start_log_var = 2 * th.log(std)
+        
+        # Projects the word embedding to x_0 
+        # i.e. x_0 is a gaussian with mean x_start_mean and std 1
         x_start = self._get_x_start(x_start_mean, std)
-        # print(x_start_mean.shape, x_start.shape)
+        target = x_start
+        
+        # Create N(0, I) if not specified
         if noise is None:
             noise = th.randn_like(x_start)
 
-        x_t = self.q_sample(x_start, t, noise=noise, mask=input_ids_mask) # reparametrization trick.
+        # Diffuse the data for a given number of diffusion steps. (known as the reparameterization trick)
+        # In other words, sample from q(x_t | x_0) = N(x_t; sqrt(alpha_t)x_0, (1-alpha_t)I)
+        x_t = self.q_sample(x_start, t, noise=noise, mask=input_ids_mask)
 
         get_logits = model.model.module.get_logits
 
+        # Calculate individual loss terms
         terms = {}
 
-        target = x_start
+        # L_VLB : Calculate MSE (i.e., difference between predicted and real tokens)
+        # "Model" here is transformer. It parameterizes sigma, calculating the mean.
         model_output = model(x_t, self._scale_timesteps(t), **model_kwargs)
         assert model_output.shape == target.shape == x_start.shape
         terms["mse"] = mean_flat((target - model_output) ** 2)
-
-        model_out_x_start = self._x0_helper(model_output, x_t, t)['pred_xstart'] # predicted_xstart = model_output
+        model_out_x_start = self._x0_helper(model_output, x_t, t)['pred_xstart'] # I believe this is the clamping trick
         t0_mask = (t == 0)
         t0_loss = mean_flat((x_start_mean - model_out_x_start) ** 2)
         terms["mse"] = th.where(t0_mask, t0_loss, terms["mse"])
 
-        # tT_mask = (t == self.num_timesteps - 1)
+        # L_T : Calculate distribution q(x_t | x_0), in this case we only care about the mean of x_t
         out_mean, _, _ = self.q_mean_variance(x_start, th.LongTensor([self.num_timesteps - 1]).to(x_start.device))
         tT_loss =  mean_flat(out_mean ** 2)
 
-        decoder_nll = self._token_discrete_loss(x_start, get_logits, input_ids_x) # embedding regularization
-        terms["nll"] = self._token_discrete_loss(model_out_x_start, get_logits, input_ids_x, mask=input_ids_mask, truncate=True, t=t) # x_0->model_out_x_start
-        # assert (model.lm_head.weight == model.word_embedding.weight).all()
+        # L_EMB : Embedding regularization, loss of -log p(w|z_0)
+        decoder_nll = self._token_discrete_loss(x_start, get_logits, input_ids_x) 
+        terms["nll"] = self._token_discrete_loss(model_out_x_start, get_logits, input_ids_x, mask=input_ids_mask, truncate=True, t=t)
 
+        # Total loss with all terms, used for descent
         terms["loss"] = terms["mse"] + decoder_nll + tT_loss
 
         return terms
@@ -795,21 +839,25 @@ class GaussianDiffusion:
 
         Same usage as p_sample_loop_progressive().
         """
+        # Check to make sure the device is the same as the model device
         if device is None:
             device = next(model.parameters()).device
+
+        # Create / use given Gaussian noise
         assert isinstance(shape, (tuple, list))
         if noise is not None:
             sample_x = noise
         else:
             sample_x = th.randn(*shape, device=device)
+
+        # Indices of timesteps, counting down from fully noisy to denoised (optionally with gap)
         indices = list(range(self.num_timesteps))[::-1][::gap]
 
         if progress:
-            # Lazy import so that we don't depend on tqdm.
             from tqdm.auto import tqdm
-
             indices = tqdm(indices)
 
+        # Use DDIM to sample the next tensor
         for i in indices:
             t = th.tensor([i] * shape[0], device=device)
             with th.no_grad():
@@ -912,8 +960,11 @@ class SpacedDiffusion(GaussianDiffusion):
         self.timestep_map = []
         self.original_num_steps = len(kwargs["betas"])
 
-        # print(kwargs.keys())
-        base_diffusion = GaussianDiffusion(**kwargs)  # pylint: disable=missing-kwoa
+        base_diffusion = GaussianDiffusion(**kwargs)
+
+        # Basically this applies a small regularization to the betas, but
+        # I've reimplemeted this in the __init__() function because it really
+        # shouldn't be here...
         last_alpha_cumprod = 1.0
         new_betas = []
         for i, alpha_cumprod in enumerate(base_diffusion.alphas_cumprod):
@@ -921,19 +972,18 @@ class SpacedDiffusion(GaussianDiffusion):
                 new_betas.append(1 - alpha_cumprod / last_alpha_cumprod)
                 last_alpha_cumprod = alpha_cumprod
                 self.timestep_map.append(i)
-        kwargs["betas"] = np.array(new_betas)
+        # kwargs["betas"] = np.array(new_betas)
+
         super().__init__(**kwargs)
 
     def p_mean_variance(
         self, model, *args, **kwargs
-    ):  # pylint: disable=signature-differs
-        # print('called p_mean_var')
+    ):
         return super().p_mean_variance(self._wrap_model(model), *args, **kwargs)
 
     def training_losses(
         self, model, *args, **kwargs
-    ):  # pylint: disable=signature-differs
-        # print('called training_losses')
+    ):  
         return super().training_losses(self._wrap_model(model), *args, **kwargs)
 
     def _wrap_model(self, model):
@@ -956,14 +1006,8 @@ class _WrappedModel:
         self.original_num_steps = original_num_steps
 
     def __call__(self, x, ts, **kwargs):
-        # print(ts)
         map_tensor = th.tensor(self.timestep_map, device=ts.device, dtype=ts.dtype)
         new_ts = map_tensor[ts]
-        # print(new_ts)
         if self.rescale_timesteps:
             new_ts = new_ts.float() * (1000.0 / self.original_num_steps)
-        # temp = self.model(x, new_ts, **kwargs)
-        # print(temp.shape)
-        # return temp
-        # print(new_ts)
         return self.model(x, new_ts, **kwargs)
