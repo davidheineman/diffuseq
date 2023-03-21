@@ -89,6 +89,9 @@ def setup_dist():
         store=tcp_store,
         timeout=timedelta(hours=2)
     )
+    if th.cuda.is_available():  # This clears remaining caches in GPU 0
+        th.cuda.set_device(dev())
+        th.cuda.empty_cache()
 
 
 def dev():
