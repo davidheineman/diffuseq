@@ -119,13 +119,22 @@ def main():
     
     from tqdm import tqdm
 
+    print(len(all_test_data))
+
     for cond in tqdm(all_test_data):
+
+        print("Reshaping so we only test on 2 sentences")
+        cond['input_ids'] = cond['input_ids'][:2,:]
+        cond['input_mask'] = cond['input_mask'][:2,:]
+        print(cond['input_ids'].shape)
+        print(cond['input_mask'].shape)
 
         input_ids_x = cond.pop('input_ids').to(dist_util.dev())
         x_start = model.get_embeds(input_ids_x)
         input_ids_mask = cond.pop('input_mask')
         input_ids_mask_ori = input_ids_mask
 
+        # Create randomly noised input
         noise = th.randn_like(x_start)
         input_ids_mask = th.broadcast_to(input_ids_mask.unsqueeze(dim=-1), x_start.shape).to(dist_util.dev())
         x_noised = th.where(input_ids_mask==0, x_start, noise)
@@ -139,6 +148,7 @@ def main():
             args.use_ddim = True
             step_gap = args.diffusion_steps//args.step
 
+        # Setup and run sample loop
         sample_fn = (
             diffusion.p_sample_loop if not args.use_ddim else diffusion.ddim_sample_loop
         )

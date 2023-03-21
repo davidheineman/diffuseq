@@ -27,7 +27,7 @@
   "use_fp16": false,
   "fp16_scale_growth": 0.001,
   "seed": 102,
-  "gradient_clipping": -1.0,
+  "gradient_clipping": 3,
   "weight_decay": 0.0,
   "learn_sigma": false,
   "use_kl": false,
