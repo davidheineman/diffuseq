@@ -126,7 +126,6 @@ def main():
 
     print(len(all_test_data))
 
-    for cond in tqdm(all_test_data):
     model_emb.to(dist_util.dev())
 
     if idx % world_size and rank >= idx % world_size:

@@ -21,7 +21,7 @@ from transformers import set_seed
 import wandb
 
 ### custom your wandb setting here ###
-with open('readme.txt', 'r') as f:
+with open('.wandb_api', 'r') as f:
     os.environ["WANDB_API_KEY"] = f.read()
 
 # print("Using CUDA launch blocking... get ready for some beautiful stack traces!")

@@ -137,6 +137,9 @@ class TrainLoop:
                         actual_model_path(resume_checkpoint), map_location=dist_util.dev()
                     )
                 )
+        else:
+            logger.log("Could not resume checkpoint!")
+            raise Exception("No!")
 
         dist_util.sync_params(self.model.parameters())
 
